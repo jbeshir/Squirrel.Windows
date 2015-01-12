@@ -43,8 +43,30 @@ namespace Squirrel
             try {
                 this.Log().Info("Downloading url: " + failedUrl ?? url);
 
-                return await this.WarnIfThrows(() => wc.DownloadDataTaskAsync(failedUrl ?? url),
-                    "Failed to download url: " + failedUrl ?? url);
+                // Start download on the threadpool,
+                // in order to avoid DNS resolution hanging UI thread.
+                return await this.WarnIfThrows(async () => {
+                    Exception ex = null;
+                    byte[] result = await Task.Run(() =>
+                    {
+                        try
+                        {
+                            return wc.DownloadDataTaskAsync(failedUrl ?? url);
+                        }
+                        catch (Exception exOnThread)
+                        {
+                            ex = exOnThread;
+                            return null;
+                        }
+                    });
+
+                    if (ex != null)
+                    {
+                        throw ex;
+                    }
+                    return result;
+                }, "Failed to download url: " + failedUrl ?? url);
+
             } catch (Exception) {
                 // NB: Some super brain-dead services are case-sensitive yet 
                 // corrupt case on upload. I can't even.
