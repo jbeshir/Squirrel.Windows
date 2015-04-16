@@ -24,6 +24,7 @@ namespace Squirrel
         string PackageName { get; }
 
         string GetReleaseNotes(string packageDirectory);
+        Uri GetIconUrl(string packageDirectory);
     }
 
     [DataContract]
@@ -68,6 +69,12 @@ namespace Squirrel
             }
 
             return zp.ReleaseNotes;
+        }
+
+        public Uri GetIconUrl(string packageDirectory)
+        {
+            var zp = new ZipPackage(Path.Combine(packageDirectory, Filename));
+            return zp.IconUrl;
         }
 
         static readonly Regex entryRegex = new Regex(@"^([0-9a-fA-F]{40})\s+(\S+)\s+(\d+)[\r]*$");
@@ -184,17 +191,24 @@ namespace Squirrel
             // Write the new RELEASES file to a temp file then move it into
             // place
             var entries = entriesQueue.ToList();
-            var tempFile = Path.GetTempFileName();
-            using (var of = File.OpenWrite(tempFile)) {
-                if (entries.Count > 0) WriteReleaseFile(entries, of);
+            var tempFile = default(string);
+            Utility.WithTempFile(out tempFile);
+
+            try {
+                using (var of = File.OpenWrite(tempFile)) {
+                    if (entries.Count > 0) WriteReleaseFile(entries, of);
+                }
+
+                var target = Path.Combine(packagesDir.FullName, "RELEASES");
+                if (File.Exists(target)) {
+                    File.Delete(target);
+                }
+
+                File.Move(tempFile, target);
+            } finally {
+                if (File.Exists(tempFile)) Utility.DeleteFileHarder(tempFile, true);
             }
 
-            var target = Path.Combine(packagesDir.FullName, "RELEASES");
-            if (File.Exists(target)) {
-                File.Delete(target);
-            }
-
-            File.Move(tempFile, target);
             return entries;
         }
 

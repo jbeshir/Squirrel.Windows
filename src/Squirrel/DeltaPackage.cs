@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using ICSharpCode.SharpZipLib.Zip;
 using Splat;
 using DeltaCompressionDotNet.MsDelta;
+using System.ComponentModel;
 
 namespace Squirrel
 {
@@ -167,7 +168,12 @@ namespace Squirrel
 
             this.Log().Info("Delta patching {0} => {1}", baseFileListing[relativePath], targetFile.FullName);
             var msDelta = new MsDeltaCompression();
-            msDelta.CreateDelta(baseFileListing[relativePath], targetFile.FullName, targetFile.FullName + ".diff");
+            try {
+                msDelta.CreateDelta(baseFileListing[relativePath], targetFile.FullName, targetFile.FullName + ".diff");
+            } catch (Win32Exception ex) {
+                this.Log().Warn("We couldn't create a delta for {0}, writing full file", targetFile.Name);
+                return;
+            }
 
             var rl = ReleaseEntry.GenerateFromFile(new MemoryStream(newData), targetFile.Name + ".shasum");
             File.WriteAllText(targetFile.FullName + ".shasum", rl.EntryAsString, Encoding.UTF8);
@@ -180,39 +186,40 @@ namespace Squirrel
             var inputFile = Path.Combine(deltaPath, relativeFilePath);
             var finalTarget = Path.Combine(workingDirectory, Regex.Replace(relativeFilePath, @".diff$", ""));
 
-            var tempTargetFile = Path.GetTempFileName();
+            var tempTargetFile = default(string);
+            Utility.WithTempFile(out tempTargetFile);
 
-            // NB: Zero-length diffs indicate the file hasn't actually changed
-            if (new FileInfo(inputFile).Length == 0) {
-                this.Log().Info("{0} exists unchanged, skipping", relativeFilePath);
-                return;
-            }
+            try {
+                // NB: Zero-length diffs indicate the file hasn't actually changed
+                if (new FileInfo(inputFile).Length == 0) {
+                    this.Log().Info("{0} exists unchanged, skipping", relativeFilePath);
+                    return;
+                }
 
-            if (relativeFilePath.EndsWith(".diff", StringComparison.InvariantCultureIgnoreCase)) {
-                this.Log().Info("Applying Diff to {0}", relativeFilePath);
-                var msDelta = new MsDeltaCompression();
-                msDelta.ApplyDelta(inputFile, finalTarget, tempTargetFile);
+                if (relativeFilePath.EndsWith(".diff", StringComparison.InvariantCultureIgnoreCase)) {
+                    this.Log().Info("Applying Diff to {0}", relativeFilePath);
+                    var msDelta = new MsDeltaCompression();
+                    msDelta.ApplyDelta(inputFile, finalTarget, tempTargetFile);
 
-                try {
                     verifyPatchedFile(relativeFilePath, inputFile, tempTargetFile);
-                } catch (Exception) {
-                    File.Delete(tempTargetFile);
-                    throw;
+                   
+                } else {
+                    using (var of = File.OpenWrite(tempTargetFile))
+                    using (var inf = File.OpenRead(inputFile)) {
+                        this.Log().Info("Adding new file: {0}", relativeFilePath);
+                        inf.CopyTo(of);
+                    }
                 }
-            } else {
-                using (var of = File.OpenWrite(tempTargetFile))
-                using (var inf = File.OpenRead(inputFile)) {
-                    this.Log().Info("Adding new file: {0}", relativeFilePath);
-                    inf.CopyTo(of);
-                }
+
+                if (File.Exists(finalTarget)) File.Delete(finalTarget);
+
+                var targetPath = Directory.GetParent(finalTarget);
+                if (!targetPath.Exists) targetPath.Create();
+
+                File.Move(tempTargetFile, finalTarget);
+            } finally {
+                if (File.Exists(tempTargetFile)) Utility.DeleteFileHarder(tempTargetFile, true);
             }
-
-            if (File.Exists(finalTarget)) File.Delete(finalTarget);
-
-            var targetPath = Directory.GetParent(finalTarget);
-            if (!targetPath.Exists) targetPath.Create();
-
-            File.Move(tempTargetFile, finalTarget);
         }
 
         void verifyPatchedFile(string relativeFilePath, string inputFile, string tempTargetFile)

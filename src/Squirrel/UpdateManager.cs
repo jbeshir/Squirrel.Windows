@@ -41,10 +41,22 @@ namespace Squirrel
             updateUrlOrPath = urlOrPath;
             this.applicationName = applicationName;
             this.appFrameworkVersion = appFrameworkVersion;
+            this.urlDownloader = urlDownloader ?? new FileDownloader();
+
+            if (rootDirectory != null) {
+                this.rootAppDirectory = Path.Combine(rootDirectory, applicationName);
+                return;
+            }
+
+            // Determine the rootAppDirectory in such a way so that Portable 
+            // Apps are more likely to work
+            var entry = Assembly.GetEntryAssembly();
+            if (entry != null) {
+                rootDirectory = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(entry.Location), "..", ".."));
+            }
 
             this.rootAppDirectory = Path.Combine(rootDirectory ?? getLocalAppDataDirectory(), applicationName);
 
-            this.urlDownloader = urlDownloader ?? new FileDownloader();
         }
 
         public async Task<UpdateInfo> CheckForUpdate(bool ignoreDeltaUpdates = false, Action<int> progress = null)
@@ -65,26 +77,26 @@ namespace Squirrel
 
         public async Task<string> ApplyReleases(UpdateInfo updateInfo, Action<int> progress = null)
         {
-            var applyReleases = new ApplyReleasesImpl(applicationName, rootAppDirectory);
+            var applyReleases = new ApplyReleasesImpl(rootAppDirectory);
             await acquireUpdateLock();
 
             return await applyReleases.ApplyReleases(updateInfo, false, false, progress);
         }
 
-        public async Task FullInstall(bool silentInstall = false)
+        public async Task FullInstall(bool silentInstall = false, Action<int> progress = null)
         {
             var updateInfo = await CheckForUpdate();
             await DownloadReleases(updateInfo.ReleasesToApply);
 
-            var applyReleases = new ApplyReleasesImpl(applicationName, rootAppDirectory);
+            var applyReleases = new ApplyReleasesImpl(rootAppDirectory);
             await acquireUpdateLock();
 
-            await applyReleases.ApplyReleases(updateInfo, silentInstall, true);
+            await applyReleases.ApplyReleases(updateInfo, silentInstall, true, progress);
         }
 
         public async Task FullUninstall()
         {
-            var applyReleases = new ApplyReleasesImpl(applicationName, rootAppDirectory);
+            var applyReleases = new ApplyReleasesImpl(rootAppDirectory);
             await acquireUpdateLock();
 
             await applyReleases.FullUninstall();
@@ -110,13 +122,13 @@ namespace Squirrel
 
         public void CreateShortcutsForExecutable(string exeName, ShortcutLocation locations, bool updateOnly)
         {
-            var installHelpers = new ApplyReleasesImpl(applicationName, rootAppDirectory);
+            var installHelpers = new ApplyReleasesImpl(rootAppDirectory);
             installHelpers.CreateShortcutsForExecutable(exeName, locations, updateOnly);
         }
 
         public void RemoveShortcutsForExecutable(string exeName, ShortcutLocation locations)
         {
-            var installHelpers = new ApplyReleasesImpl(applicationName, rootAppDirectory);
+            var installHelpers = new ApplyReleasesImpl(rootAppDirectory);
             installHelpers.RemoveShortcutsForExecutable(exeName, locations);
         }
 
@@ -148,6 +160,7 @@ namespace Squirrel
             }
         }
 
+        static bool exiting = false;
         public static void RestartApp(string exeToStart = null, string arguments = null)
         { 
             // NB: Here's how this method works:
@@ -166,13 +179,20 @@ namespace Squirrel
             var argsArg = arguments != null ?
                 String.Format("-a \"{0}\"", arguments) : "";
 
-            Process.Start(getUpdateExe(), String.Format("--processStart {0} {1}", exeToStart, argsArg));
+            exiting = true;
+
+            Process.Start(getUpdateExe(), String.Format("--processStartAndWait {0} {1}", exeToStart, argsArg));
+
+            // NB: We have to give update.exe some time to grab our PID, but
+            // we can't use WaitForInputIdle because we probably don't have
+            // whatever WaitForInputIdle considers a message loop.
+            Thread.Sleep(500);
             Environment.Exit(0);
         }
 
         ~UpdateManager()
         {
-            if (updateLock != null) {
+            if (updateLock != null && !exiting) {
                 throw new Exception("You must dispose UpdateManager!");
             }
         }
@@ -204,7 +224,17 @@ namespace Squirrel
 
         static string getUpdateExe()
         {
-            var assembly = Assembly.GetExecutingAssembly();
+            var assembly = Assembly.GetEntryAssembly();
+
+            // Are we update.exe?
+            if (assembly != null &&
+                Path.GetFileName(assembly.Location).Equals("update.exe", StringComparison.OrdinalIgnoreCase) &&
+                assembly.Location.IndexOf("app-", StringComparison.OrdinalIgnoreCase) == -1 &&
+                assembly.Location.IndexOf("SquirrelTemp", StringComparison.OrdinalIgnoreCase) == -1) {
+                return Path.GetFullPath(assembly.Location);
+            }
+
+            assembly = Assembly.GetExecutingAssembly();
 
             var updateDotExe = Path.Combine(Path.GetDirectoryName(assembly.Location), "..\\Update.exe");
             var target = new FileInfo(updateDotExe);

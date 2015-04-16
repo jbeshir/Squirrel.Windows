@@ -13,6 +13,10 @@ using System.Threading.Tasks;
 using Mono.Options;
 using Splat;
 using Squirrel;
+using System.Drawing;
+using System.Windows;
+using System.Windows.Shell;
+using NuGet;
 
 namespace Squirrel.Update
 {
@@ -40,8 +44,6 @@ namespace Squirrel.Update
 
         int main(string[] args)
         {
-            var animatedGifWindowToken = new CancellationTokenSource();
-
             // NB: Trying to delete the app directory while we have Setup.log 
             // open will actually crash the uninstaller
             bool isUninstalling = args.Any(x => x.Contains("uninstall"));
@@ -49,6 +51,8 @@ namespace Squirrel.Update
             // Uncomment to test Gifs
             //AnimatedGifWindow.ShowWindow(TimeSpan.FromMilliseconds(0), animatedGifWindowToken.Token);
             //Thread.Sleep(10 * 60 * 1000);
+
+            var animatedGifWindowToken = new CancellationTokenSource();
 
             using (Disposable.Create(() => animatedGifWindowToken.Cancel()))
             using (var logger = new SetupLogLogger(isUninstalling) { Level = Splat.LogLevel.Info }) {
@@ -75,6 +79,9 @@ namespace Squirrel.Update
                 string processStart = default(string);
                 string processStartArgs = default(string);
                 string appName = default(string);
+                string setupIcon = default(string);
+                string shortcutArgs = default(string);
+                bool shouldWait = false;
 
                 opts = new OptionSet() {
                     "Usage: Squirrel.exe command [OPTS]",
@@ -90,6 +97,7 @@ namespace Squirrel.Update
                     { "removeShortcut=", "Remove a shortcut for the given executable name", v => { updateAction = UpdateAction.Deshortcut; target = v; } },
                     { "updateSelf=", "Copy the currently executing Update.exe into the default location", v => { updateAction =  UpdateAction.UpdateSelf; appName = v; } },
                     { "processStart=", "Start an executable in the latest version of the app package", v => { updateAction =  UpdateAction.ProcessStart; processStart = v; }, true},
+                    { "processStartAndWait=", "Start an executable in the latest version of the app package", v => { updateAction =  UpdateAction.ProcessStart; processStart = v; shouldWait = true; }, true},
                     "",
                     "Options:",
                     { "h|?|help", "Display Help and exit", _ => {} },
@@ -97,10 +105,12 @@ namespace Squirrel.Update
                     { "p=|packagesDir=", "Path to the NuGet Packages directory for C# apps", v => packagesDir = v},
                     { "bootstrapperExe=", "Path to the Setup.exe to use as a template", v => bootstrapperExe = v},
                     { "g=|loadingGif=", "Path to an animated GIF to be displayed during installation", v => backgroundGif = v},
+                    { "i=|setupIcon", "Path to an ICO file that will be used for the Setup executable's icon", v => setupIcon = v},
                     { "n=|signWithParams=", "Sign the installer via SignTool.exe with the parameters given", v => signingParameters = v},
                     { "s|silent", "Silent install", _ => silentInstall = true},
                     { "b=|baseUrl=", "Provides a base URL to prefix the RELEASES file packages with", v => baseUrl = v, true},
                     { "a=|process-start-args=", "Arguments that will be used when starting executable", v => processStartArgs = v, true},
+                    { "l=|shortcut-locations=", "Comma-separated string of shortcut locations, e.g. 'Desktop,StartMenu'", v => shortcutArgs = v},
                 };
 
                 opts.Parse(args);
@@ -112,8 +122,13 @@ namespace Squirrel.Update
 
                 switch (updateAction) {
                 case UpdateAction.Install:
-                    AnimatedGifWindow.ShowWindow(TimeSpan.FromSeconds(4), animatedGifWindowToken.Token);
-                    Install(silentInstall, Path.GetFullPath(target)).Wait();
+                    var progressSource = new ProgressSource();
+                    if (!silentInstall) { 
+                        AnimatedGifWindow.ShowWindow(TimeSpan.FromSeconds(4), animatedGifWindowToken.Token, progressSource);
+                    }
+
+                    Install(silentInstall, progressSource, Path.GetFullPath(target)).Wait();
+                    animatedGifWindowToken.Cancel();
                     break;
                 case UpdateAction.Uninstall:
                     Uninstall().Wait();
@@ -128,16 +143,16 @@ namespace Squirrel.Update
                     UpdateSelf(appName).Wait();
                     break;
                 case UpdateAction.Releasify:
-                    Releasify(target, releaseDir, packagesDir, bootstrapperExe, backgroundGif, signingParameters, baseUrl);
+                    Releasify(target, releaseDir, packagesDir, bootstrapperExe, backgroundGif, signingParameters, baseUrl, setupIcon);
                     break;
                 case UpdateAction.Shortcut:
-                    Shortcut(target);
+                    Shortcut(target, shortcutArgs);
                     break;
                 case UpdateAction.Deshortcut:
-                    Deshortcut(target);
+                    Deshortcut(target, shortcutArgs);
                     break;
                 case UpdateAction.ProcessStart:
-                    ProcessStart(processStart, processStartArgs);
+                    ProcessStart(processStart, processStartArgs, shouldWait);
                     break;
                 }
             }
@@ -145,7 +160,7 @@ namespace Squirrel.Update
             return 0;
         }
 
-        public async Task Install(bool silentInstall, string sourceDirectory = null)
+        public async Task Install(bool silentInstall, ProgressSource progressSource, string sourceDirectory = null)
         {
             sourceDirectory = sourceDirectory ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             var releasesPath = Path.Combine(sourceDirectory, "RELEASES");
@@ -164,17 +179,17 @@ namespace Squirrel.Update
             var ourAppName = ReleaseEntry.ParseReleaseFile(File.ReadAllText(releasesPath, Encoding.UTF8))
                 .First().PackageName;
 
-            using (var mgr = new UpdateManager(sourceDirectory, ourAppName, FrameworkVersion.Net45)) {
+            var rootDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            using (var mgr = new UpdateManager(sourceDirectory, ourAppName, FrameworkVersion.Net45, rootDir)) {
                 Directory.CreateDirectory(mgr.RootAppDirectory);
 
                 var updateTarget = Path.Combine(mgr.RootAppDirectory, "Update.exe");
                 this.ErrorIfThrows(() => File.Copy(Assembly.GetExecutingAssembly().Location, updateTarget, true),
                     "Failed to copy Update.exe to " + updateTarget);
 
-                await mgr.FullInstall(silentInstall);
+                await mgr.FullInstall(silentInstall, progressSource.Raise);
 
-                await this.ErrorIfThrows(() =>
-                    mgr.CreateUninstallerRegistryEntry(),
+                await this.ErrorIfThrows(() => mgr.CreateUninstallerRegistryEntry(),
                     "Failed to create uninstaller registry entry");
             }
         }
@@ -185,7 +200,11 @@ namespace Squirrel.Update
 
             this.Log().Info("Starting update, downloading from " + updateUrl);
 
-            using (var mgr = new UpdateManager(updateUrl, appName, FrameworkVersion.Net45)) {
+            // NB: Always basing the rootAppDirectory relative to ours allows us to create Portable
+            // Applications
+            var ourDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "..");
+
+            using (var mgr = new UpdateManager(updateUrl, appName, FrameworkVersion.Net45, ourDir)) {
                 bool ignoreDeltaUpdates = false;
 
             retry:
@@ -214,7 +233,7 @@ namespace Squirrel.Update
 
         public async Task UpdateSelf(string appName)
         {
-            var localAppDir = Environment.ExpandEnvironmentVariables("%LocalAppData%");
+            var localAppDir = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
             var targetDir = new DirectoryInfo(
                 Path.Combine(localAppDir, appName));
 
@@ -245,8 +264,12 @@ namespace Squirrel.Update
         {
             appName = appName ?? getAppNameFromDirectory();
 
+            // NB: Always basing the rootAppDirectory relative to ours allows us to create Portable
+            // Applications
+            var ourDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "..");
+
             this.Log().Info("Fetching update information, downloading from " + updateUrl);
-            using (var mgr = new UpdateManager(updateUrl, appName, FrameworkVersion.Net45)) {
+            using (var mgr = new UpdateManager(updateUrl, appName, FrameworkVersion.Net45, ourDir)) {
                 var updateInfo = await mgr.CheckForUpdate(progress: x => Console.WriteLine(x / 3));
                 await mgr.DownloadReleases(updateInfo.ReleasesToApply, x => Console.WriteLine(33 + x / 3));
 
@@ -269,14 +292,18 @@ namespace Squirrel.Update
         {
             this.Log().Info("Starting uninstall for app: " + appName);
 
+            // NB: Always basing the rootAppDirectory relative to ours allows us to create Portable
+            // Applications
+            var ourDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "..");
+
             appName = appName ?? getAppNameFromDirectory();
-            using (var mgr = new UpdateManager("", appName, FrameworkVersion.Net45)) {
+            using (var mgr = new UpdateManager("", appName, FrameworkVersion.Net45, ourDir)) {
                 await mgr.FullUninstall();
                 mgr.RemoveUninstallerRegistryEntry();
             }
         }
 
-        public void Releasify(string package, string targetDir = null, string packagesDir = null, string bootstrapperExe = null, string backgroundGif = null, string signingOpts = null, string baseUrl = null)
+        public void Releasify(string package, string targetDir = null, string packagesDir = null, string bootstrapperExe = null, string backgroundGif = null, string signingOpts = null, string baseUrl = null, string setupIcon = null)
         {
             if (baseUrl != null) {
                 if (!Utility.IsHttpUrl(baseUrl)) {
@@ -314,9 +341,9 @@ namespace Squirrel.Update
             var processed = new List<string>();
 
             var releaseFilePath = Path.Combine(di.FullName, "RELEASES");
-            var previousReleases = Enumerable.Empty<ReleaseEntry>();
+            var previousReleases = new List<ReleaseEntry>();
             if (File.Exists(releaseFilePath)) {
-                previousReleases = ReleaseEntry.ParseReleaseFile(File.ReadAllText(releaseFilePath, Encoding.UTF8));
+                previousReleases.AddRange(ReleaseEntry.ParseReleaseFile(File.ReadAllText(releaseFilePath, Encoding.UTF8)));
             }
 
             foreach (var file in toProcess) {
@@ -346,7 +373,9 @@ namespace Squirrel.Update
 
             foreach (var file in toProcess) { File.Delete(file.FullName); }
 
-            var releaseEntries = previousReleases.Concat(processed.Select(packageFilename => ReleaseEntry.GenerateFromFile(packageFilename, baseUrl)));
+            var newReleaseEntries = processed.Select(packageFilename => ReleaseEntry.GenerateFromFile(packageFilename, baseUrl)).ToList();
+            var distinctPreviousReleases = previousReleases.Where(x => !newReleaseEntries.Select(e => e.Version).Contains(x.Version));
+            var releaseEntries = distinctPreviousReleases.Concat(newReleaseEntries).ToList();
             ReleaseEntry.WriteReleaseFile(releaseEntries, releaseFilePath);
 
             var targetSetupExe = Path.Combine(di.FullName, "Setup.exe");
@@ -376,12 +405,16 @@ namespace Squirrel.Update
                 File.Delete(zipPath);
             }
 
+            Utility.Retry(() =>
+                setPEVersionInfoAndIcon(targetSetupExe, new ZipPackage(package), setupIcon).Wait());
+
             if (signingOpts != null) {
                 signPEFile(targetSetupExe, signingOpts).Wait();
             }
+
         }
 
-        public void Shortcut(string exeName)
+        public void Shortcut(string exeName, string shortcutArgs)
         {
             if (String.IsNullOrWhiteSpace(exeName)) {
                 ShowHelp();
@@ -389,12 +422,19 @@ namespace Squirrel.Update
             }
 
             var appName = getAppNameFromDirectory();
-            using (var mgr = new UpdateManager("", appName, FrameworkVersion.Net45)) {
-                mgr.CreateShortcutsForExecutable(exeName, ShortcutLocation.Desktop | ShortcutLocation.StartMenu, false);
+            var defaultLocations = ShortcutLocation.StartMenu | ShortcutLocation.Desktop;
+            var locations = parseShortcutLocations(shortcutArgs);
+
+            // NB: Always basing the rootAppDirectory relative to ours allows us to create Portable
+            // Applications
+            var ourDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "..");
+
+            using (var mgr = new UpdateManager("", appName, FrameworkVersion.Net45, ourDir)) {
+                mgr.CreateShortcutsForExecutable(exeName, locations ?? defaultLocations, false);
             }
         }
 
-        public void Deshortcut(string exeName)
+        public void Deshortcut(string exeName, string shortcutArgs)
         {
             if (String.IsNullOrWhiteSpace(exeName)) {
                 ShowHelp();
@@ -402,19 +442,24 @@ namespace Squirrel.Update
             }
 
             var appName = getAppNameFromDirectory();
-            using (var mgr = new UpdateManager("", appName, FrameworkVersion.Net45)) {
-                mgr.RemoveShortcutsForExecutable(exeName, ShortcutLocation.Desktop | ShortcutLocation.StartMenu);
+            var defaultLocations = ShortcutLocation.StartMenu | ShortcutLocation.Desktop;
+            var locations = parseShortcutLocations(shortcutArgs);
+
+            // NB: Always basing the rootAppDirectory relative to ours allows us to create Portable
+            // Applications
+            var ourDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), "..");
+
+            using (var mgr = new UpdateManager("", appName, FrameworkVersion.Net45, ourDir)) {
+                mgr.RemoveShortcutsForExecutable(exeName, locations ?? defaultLocations);
             }
         }
 
-        public void ProcessStart(string exeName, string arguments)
+        public void ProcessStart(string exeName, string arguments, bool shouldWait)
         {
             if (String.IsNullOrWhiteSpace(exeName)) {
                 ShowHelp();
                 return;
             }
-
-            waitForParentToExit();
 
             // Find the latest installed version's app dir
             var appDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
@@ -440,6 +485,8 @@ namespace Squirrel.Update
                 throw new ArgumentException();
             }
 
+            if (shouldWait) waitForParentToExit();
+
             try {
                 this.Log().Info("About to launch: '{0}': {1}", targetExe.FullName, arguments ?? "");
                 Process.Start(new ProcessStartInfo(targetExe.FullName, arguments ?? ""));
@@ -454,7 +501,7 @@ namespace Squirrel.Update
             opts.WriteOptionDescriptions(Console.Out);
         }
 
-        static void waitForParentToExit()
+        void waitForParentToExit()
         {
             // Grab a handle the parent process
             var parentPid = NativeMethods.GetParentProcessId();
@@ -463,9 +510,12 @@ namespace Squirrel.Update
             // Wait for our parent to exit
             try {
                 handle = NativeMethods.OpenProcess(ProcessAccess.Synchronize, false, parentPid);
-                if (handle == IntPtr.Zero) throw new Win32Exception();
-
-                NativeMethods.WaitForSingleObject(handle, 0xFFFFFFFF /*INFINITE*/);
+                if (handle != IntPtr.Zero) {
+                    this.Log().Info("About to wait for parent PID {0}", parentPid);
+                    NativeMethods.WaitForSingleObject(handle, 0xFFFFFFFF /*INFINITE*/);
+                } else {
+                    this.Log().Info("Parent PID {0} no longer valid - ignoring", parentPid);
+                }
             } finally {
                 if (handle != IntPtr.Zero) NativeMethods.CloseHandle(handle);
             }
@@ -528,15 +578,52 @@ namespace Squirrel.Update
             }
 
             Tuple<int, string> processResult = await Utility.InvokeProcessAsync(exe,
-                String.Format("sign {0} {1}", signingOpts, exePath));
+                String.Format("sign {0} {1}", signingOpts, exePath), CancellationToken.None);
 
             if (processResult.Item1 != 0) {
                 var msg = String.Format(
                     "Failed to sign, command invoked was: '{0} sign {1} {2}'", 
                     exe, signingOpts, exePath);
                 throw new Exception(msg);
+            } else {
+                Console.WriteLine(processResult.Item2);
             }
-            else {
+        }
+
+        static async Task setPEVersionInfoAndIcon(string exePath, IPackage package, string iconPath = null)
+        {
+            var verStrings = new Dictionary<string, string>() {
+                { "CompanyName", package.Authors.First() },
+                { "FileDescription", package.Summary ?? package.Description ?? "Installer for " + package.Id },
+                { "ProductName", package.Description ?? package.Summary ?? package.Id },
+            };
+
+            var args = verStrings.Aggregate(new StringBuilder("\"" + exePath + "\""), (acc, x) => { acc.AppendFormat(" --set-version-string \"{0}\" \"{1}\"", x.Key, x.Value); return acc; });
+            args.AppendFormat(" --set-file-version {0} --set-product-version {0}", package.Version.ToString());
+            if (iconPath != null) {
+                args.AppendFormat(" --set-icon \"{0}\"", Path.GetFullPath(iconPath));
+            }
+
+            // Try to find rcedit.exe
+            var exe = @".\rcedit.exe";
+            if (!File.Exists(exe)) {
+                exe = Path.Combine(
+                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    "rcedit.exe");
+
+                // Run down PATH and hope for the best
+                if (!File.Exists(exe)) exe = "rcedit.exe";
+            }
+
+            var processResult = await Utility.InvokeProcessAsync(exe, args.ToString(), CancellationToken.None);
+
+            if (processResult.Item1 != 0) {
+                var msg = String.Format(
+                    "Failed to modify resources, command invoked was: '{0} {1}'\n\nOutput was:\n{2}", 
+                    exe, args, processResult.Item2);
+
+                throw new Exception(msg);
+            } else {
                 Console.WriteLine(processResult.Item2);
             }
         }
@@ -545,6 +632,26 @@ namespace Squirrel.Update
         {
             path = path ?? Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
             return (new DirectoryInfo(path)).Name;
+        }
+
+        static ShortcutLocation? parseShortcutLocations(string shortcutArgs)
+        {
+            var ret = default(ShortcutLocation?);
+
+            if (!String.IsNullOrWhiteSpace(shortcutArgs)) {
+                var args = shortcutArgs.Split(new[] { ',' });
+
+                foreach (var arg in args) {
+                    var location = (ShortcutLocation)(Enum.Parse(typeof(ShortcutLocation), arg, false));
+                    if (ret.HasValue) {
+                        ret |= location;
+                    } else {
+                        ret = location;
+                    }
+                }
+            }
+
+            return ret;
         }
 
         static int consoleCreated = 0;
@@ -558,6 +665,17 @@ namespace Squirrel.Update
 
             NativeMethods.GetStdHandle(StandardHandles.STD_ERROR_HANDLE);
             NativeMethods.GetStdHandle(StandardHandles.STD_OUTPUT_HANDLE);
+        }
+    }
+
+    public class ProgressSource
+    {
+        public event EventHandler<int> Progress;
+
+        public void Raise(int i)
+        {
+            if (Progress != null)
+                Progress.Invoke(this, i);
         }
     }
 
@@ -575,9 +693,7 @@ namespace Squirrel.Update
                     Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
 
                 var file = Path.Combine(dir, "SquirrelSetup.log");
-                if (File.Exists(file)) File.Delete(file);
-
-                inner = new StreamWriter(file, false, Encoding.UTF8);
+                inner = new StreamWriter(file, true, Encoding.UTF8);
             } catch (Exception ex) {
                 // Didn't work? Log to stderr
                 Console.Error.WriteLine("Couldn't open log file, writing to stderr: " + ex.ToString());
@@ -596,7 +712,10 @@ namespace Squirrel.Update
 
         public void Dispose()
         {
-            lock(gate) inner.Dispose();
+            lock (gate) {
+                inner.Flush();
+                inner.Dispose();
+            }
         }
     }
 }
