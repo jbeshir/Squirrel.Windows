@@ -3,11 +3,14 @@
 // are changed infrequently
 //
 
+#define _CRT_SECURE_NO_WARNINGS 1
+
 #pragma once
 
 #include "targetver.h"
 
 #define WIN32_LEAN_AND_MEAN             // Exclude rarely-used stuff from Windows headers
+#define SECURITY_WIN32
 
 // Windows Header Files:
 #include <windows.h>
@@ -28,6 +31,7 @@
 #include <atlwin.h>
 
 #include <windows.h>
+#include <security.h>
 #include <shlobj.h>
 #include <exdisp.h>
 #include <shlwapi.h>

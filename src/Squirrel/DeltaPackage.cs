@@ -9,6 +9,7 @@ using ICSharpCode.SharpZipLib.Zip;
 using Splat;
 using DeltaCompressionDotNet.MsDelta;
 using System.ComponentModel;
+using Squirrel.Bsdiff;
 
 namespace Squirrel
 {
@@ -20,6 +21,12 @@ namespace Squirrel
 
     public class DeltaPackageBuilder : IEnableLogger, IDeltaPackageBuilder
     {
+        readonly string localAppDirectory;
+        public DeltaPackageBuilder(string localAppDataOverride = null)
+        {
+            this.localAppDirectory = localAppDataOverride;
+        }
+
         public ReleasePackage CreateDeltaPackage(ReleasePackage basePackage, ReleasePackage newPackage, string outputFile)
         {
             Contract.Requires(basePackage != null);
@@ -48,8 +55,8 @@ namespace Squirrel
             string baseTempPath = null;
             string tempPath = null;
 
-            using (Utility.WithTempDirectory(out baseTempPath))
-            using (Utility.WithTempDirectory(out tempPath)) {
+            using (Utility.WithTempDirectory(out baseTempPath, null))
+            using (Utility.WithTempDirectory(out tempPath, null)) {
                 var baseTempInfo = new DirectoryInfo(baseTempPath);
                 var tempInfo = new DirectoryInfo(tempPath);
 
@@ -89,8 +96,8 @@ namespace Squirrel
             string workingPath;
             string deltaPath;
 
-            using (Utility.WithTempDirectory(out deltaPath))
-            using (Utility.WithTempDirectory(out workingPath)) {
+            using (Utility.WithTempDirectory(out deltaPath, localAppDirectory))
+            using (Utility.WithTempDirectory(out workingPath, localAppDirectory)) {
                 var fz = new FastZip();
                 fz.ExtractZip(deltaPackage.InputPackageFile, deltaPath, null);
                 fz.ExtractZip(basePackage.InputPackageFile, workingPath, null);
@@ -170,9 +177,25 @@ namespace Squirrel
             var msDelta = new MsDeltaCompression();
             try {
                 msDelta.CreateDelta(baseFileListing[relativePath], targetFile.FullName, targetFile.FullName + ".diff");
-            } catch (Win32Exception ex) {
-                this.Log().Warn("We couldn't create a delta for {0}, writing full file", targetFile.Name);
-                return;
+            } catch (Win32Exception) {
+                this.Log().Warn("We couldn't create a delta for {0}, attempting to create bsdiff", targetFile.Name);
+
+                var of = default(FileStream);
+                try {
+                    of = File.Create(targetFile.FullName + ".bsdiff");
+                    BinaryPatchUtility.Create(oldData, newData, of);
+
+                    // NB: Create a dummy corrupt .diff file so that older 
+                    // versions which don't understand bsdiff will fail out
+                    // until they get upgraded, instead of seeing the missing
+                    // file and just removing it.
+                    File.WriteAllText(targetFile.FullName + ".diff", "1");
+                } catch (Exception ex) {
+                    this.Log().WarnException(String.Format("We really couldn't create a delta for {0}", targetFile.Name), ex);
+                    return;
+                } finally {
+                    if (of != null) of.Dispose();
+                }
             }
 
             var rl = ReleaseEntry.GenerateFromFile(new MemoryStream(newData), targetFile.Name + ".shasum");
@@ -187,7 +210,7 @@ namespace Squirrel
             var finalTarget = Path.Combine(workingDirectory, Regex.Replace(relativeFilePath, @".diff$", ""));
 
             var tempTargetFile = default(string);
-            Utility.WithTempFile(out tempTargetFile);
+            Utility.WithTempFile(out tempTargetFile, localAppDirectory);
 
             try {
                 // NB: Zero-length diffs indicate the file hasn't actually changed
@@ -196,13 +219,20 @@ namespace Squirrel
                     return;
                 }
 
-                if (relativeFilePath.EndsWith(".diff", StringComparison.InvariantCultureIgnoreCase)) {
-                    this.Log().Info("Applying Diff to {0}", relativeFilePath);
+                 if (relativeFilePath.EndsWith(".bsdiff", StringComparison.InvariantCultureIgnoreCase)) {
+                    using (var of = File.OpenWrite(tempTargetFile))
+                    using (var inf = File.OpenRead(finalTarget)) {
+                        this.Log().Info("Applying BSDiff to {0}", relativeFilePath);
+                        BinaryPatchUtility.Apply(inf, () => File.OpenRead(inputFile), of);
+                    }
+
+                    verifyPatchedFile(relativeFilePath, inputFile, tempTargetFile);
+                 } else if (relativeFilePath.EndsWith(".diff", StringComparison.InvariantCultureIgnoreCase)) {
+                    this.Log().Info("Applying MSDiff to {0}", relativeFilePath);
                     var msDelta = new MsDeltaCompression();
                     msDelta.ApplyDelta(inputFile, finalTarget, tempTargetFile);
 
                     verifyPatchedFile(relativeFilePath, inputFile, tempTargetFile);
-                   
                 } else {
                     using (var of = File.OpenWrite(tempTargetFile))
                     using (var inf = File.OpenRead(inputFile)) {

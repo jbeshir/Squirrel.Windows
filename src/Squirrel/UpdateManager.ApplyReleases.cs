@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using NuGet;
 using Splat;
 using System.Threading;
+using Squirrel.Shell;
 
 namespace Squirrel
 {
@@ -18,9 +19,6 @@ namespace Squirrel
     {
         internal class ApplyReleasesImpl : IEnableLogger
         {
-            // TODO: Kill this entire concept
-            readonly FrameworkVersion appFrameworkVersion = FrameworkVersion.Net45;
-
             readonly string rootAppDirectory;
 
             public ApplyReleasesImpl(string rootAppDirectory)
@@ -119,9 +117,15 @@ namespace Squirrel
 
                 await this.ErrorIfThrows(() => Utility.DeleteDirectoryWithFallbackToNextReboot(rootAppDirectory),
                     "Failed to delete app directory: " + rootAppDirectory);
+
+                // NB: We drop this file here so that --checkInstall will ignore 
+                // this folder - if we don't do this, users who "accidentally" run as 
+                // administrator will find the app reinstalling itself on every
+                // reboot
+                File.WriteAllText(Path.Combine(rootAppDirectory, ".dead"), " ");
             }
 
-            public void CreateShortcutsForExecutable(string exeName, ShortcutLocation locations, bool updateOnly)
+            public void CreateShortcutsForExecutable(string exeName, ShortcutLocation locations, bool updateOnly, string programArguments)
             {
                 this.Log().Info("About to create shortcuts for {0}, rootAppDir {1}", exeName, rootAppDirectory);
 
@@ -155,21 +159,7 @@ namespace Squirrel
 
                     ShellLink sl;
                     this.ErrorIfThrows(() => {
-                        if (fileExists) {
-                            try {
-                                sl = new ShellLink();
-
-                                sl.Open(file);
-                                if (sl.Target == updateExe && sl.Description == zf.Description && sl.IconPath == exePath) {
-                                    return;
-                                }
-
-                                File.Delete(file);
-                            } catch (Exception ex) {
-                                this.Log().WarnException("Tried to compare shortcut and failed", ex);
-                                File.Delete(file);
-                            }
-                        }
+                        File.Delete(file);
 
                         sl = new ShellLink {
                             Target = updateExe,
@@ -180,12 +170,18 @@ namespace Squirrel
                             Arguments = "--processStart " + exeName,
                         };
 
+                        if (!String.IsNullOrWhiteSpace(programArguments)) {
+                            sl.Arguments += String.Format(" -a \"{0}\"", programArguments);
+                        }
+
                         sl.SetAppUserModelId(String.Format("com.squirrel.{0}.{1}", zf.Id, exeName.Replace(".exe", "")));
 
                         this.Log().Info("About to save shortcut: {0} (target {1}, workingDir {2}, args {3})", file, sl.Target, sl.WorkingDirectory, sl.Arguments);
                         if (ModeDetector.InUnitTestRunner() == false) sl.Save(file);
                     }, "Can't write shortcut: " + file);
                 }
+
+                fixPinnedExecutables(zf.Version.Version);
             }
 
             public void RemoveShortcutsForExecutable(string exeName, ShortcutLocation locations)
@@ -211,6 +207,8 @@ namespace Squirrel
                         if (File.Exists(file)) File.Delete(file);
                     }, "Couldn't delete shortcut: " + file);
                 }
+
+                fixPinnedExecutables(zf.Version.Version);
             }
 
             async Task<string> installPackageToAppDir(UpdateInfo updateInfo, ReleaseEntry release)
@@ -234,7 +232,7 @@ namespace Squirrel
                 // with the 4.0 version.
                 this.Log().Info("Writing files to app directory: {0}", target.FullName);
 
-                var toWrite = pkg.GetLibFiles().Where(x => pathIsInFrameworkProfile(x, appFrameworkVersion))
+                var toWrite = pkg.GetLibFiles().Where(x => pathIsInFrameworkProfile(x))
                     .OrderBy(x => x.Path)
                     .ToList();
 
@@ -279,14 +277,9 @@ namespace Squirrel
                 }, "Failed to write file: " + target.FullName);
             }
 
-            static bool pathIsInFrameworkProfile(IPackageFile packageFile, FrameworkVersion appFrameworkVersion)
+            static bool pathIsInFrameworkProfile(IPackageFile packageFile)
             {
                 if (!packageFile.Path.StartsWith("lib", StringComparison.InvariantCultureIgnoreCase)) {
-                    return false;
-                }
-
-                if (appFrameworkVersion == FrameworkVersion.Net40
-                    && packageFile.Path.StartsWith("lib\\net45", StringComparison.InvariantCultureIgnoreCase)) {
                     return false;
                 }
 
@@ -316,7 +309,7 @@ namespace Squirrel
                     var basePkg = new ReleasePackage(Path.Combine(rootAppDirectory, "packages", currentVersion.Filename));
                     var deltaPkg = new ReleasePackage(Path.Combine(rootAppDirectory, "packages", releasesToApply.First().Filename));
 
-                    var deltaBuilder = new DeltaPackageBuilder();
+                    var deltaBuilder = new DeltaPackageBuilder(Directory.GetParent(this.rootAppDirectory).FullName);
 
                     return deltaBuilder.ApplyDeltaPackage(basePkg, deltaPkg,
                         Regex.Replace(deltaPkg.InputPackageFile, @"-delta.nupkg$", ".nupkg", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant));
@@ -364,7 +357,7 @@ namespace Squirrel
                 if (us != null && Path.GetFileName(us.Location).Equals("update.exe", StringComparison.OrdinalIgnoreCase)) {
                     var appName = targetDir.Parent.Name;
 
-                    Process.Start(newSquirrel, "--updateSelf=" + appName);
+                    Process.Start(newSquirrel, "--updateSelf=" + us.Location);
                     return;
                 }
 
@@ -410,7 +403,7 @@ namespace Squirrel
 
                     // Create shortcuts for apps automatically if they didn't
                     // create any Squirrel-aware apps
-                    squirrelApps.ForEach(x => CreateShortcutsForExecutable(Path.GetFileName(x), ShortcutLocation.Desktop | ShortcutLocation.StartMenu, isInitialInstall == false));
+                    squirrelApps.ForEach(x => CreateShortcutsForExecutable(Path.GetFileName(x), ShortcutLocation.Desktop | ShortcutLocation.StartMenu, isInitialInstall == false, null));
                 }
 
                 if ((!isInitialInstall || silentInstall) && !runOnly) return;
@@ -476,7 +469,7 @@ namespace Squirrel
                 this.Log().Info("Processing shortcut '{0}'", shortcut.Target);
 
                 foreach (var oldAppDirectory in oldAppDirectories) {
-                    if (!shortcut.Target.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase)) {
+                    if (!shortcut.Target.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase) && !shortcut.IconPath.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase)) {
                         this.Log().Info("Does not match '{0}', continuing to next directory", oldAppDirectory);
                         continue;
                     }
@@ -494,9 +487,14 @@ namespace Squirrel
                                 shortcut.WorkingDirectory.Substring(oldAppDirectory.Length + 1));
                         }
 
+                        // replace working directory too if appropriate
+                        if (shortcut.IconPath.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase)) {
+                            this.Log().Info("Changing new directory to '{0}'", newAppPath);
+                            shortcut.IconPath = Path.Combine(newAppPath, shortcut.IconPath.Substring(oldAppDirectory.Length + 1));
+                        }
+
                         shortcut.Save();
-                    }
-                    else {
+                    } else {
                         this.Log().Info("Unpinning {0} from taskbar", shortcut.Target);
                         TaskbarHelper.UnpinFromTaskbar(shortcut.Target);
                     }
@@ -563,6 +561,11 @@ namespace Squirrel
                         }
                     });
                 }
+
+                // Include dead folders in folders to :fire:
+                toCleanup = di.GetDirectories()
+                    .Where(x => x.Name.ToLowerInvariant().Contains("app-"))
+                    .Where(x => x.Name != currentVersionFolder && x.Name != originalVersionFolder);
 
                 // Finally, clean up the app-X.Y.Z directories
                 await toCleanup.ForEachAsync(async x => {

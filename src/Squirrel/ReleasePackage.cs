@@ -9,6 +9,7 @@ using System.Runtime.Versioning;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
+using ICSharpCode.SharpZipLib.Core;
 using ICSharpCode.SharpZipLib.Zip;
 using MarkdownSharp;
 using NuGet;
@@ -101,7 +102,6 @@ namespace Squirrel
             // ever expect one entry here (crash hard otherwise)
             var frameworks = package.GetSupportedFrameworks();
             if (frameworks.Count() > 1) {
-
                 var platforms = frameworks
                     .Aggregate(new StringBuilder(), (sb, f) => sb.Append(f.ToString() + "; "));
 
@@ -109,7 +109,6 @@ namespace Squirrel
                     "The input package file {0} targets multiple platforms - {1} - and cannot be transformed into a release package.", InputPackageFile, platforms));
 
             } else if (!frameworks.Any()) {
-
                 throw new InvalidOperationException(String.Format(
                     "The input package file {0} targets no platform and cannot be transformed into a release package.", InputPackageFile));
             }
@@ -126,7 +125,7 @@ namespace Squirrel
 
             string tempPath = null;
 
-            using (Utility.WithTempDirectory(out tempPath)) {
+            using (Utility.WithTempDirectory(out tempPath, null)) {
                 var tempDir = new DirectoryInfo(tempPath);
                 var fz = new FastZip();
 
@@ -151,6 +150,7 @@ namespace Squirrel
                     contentsPostProcessHook(tempPath);
                 }
 
+                fz.EntryFactory = new StoreEntryFactory(new ZipEntryFactory());
                 fz.CreateZip(outputFile, tempPath, true, null);
                                 
                 ReleasePackageFile = outputFile;
@@ -279,6 +279,54 @@ namespace Squirrel
 
             using (var sw = new StreamWriter(path, false, Encoding.UTF8)) {
                 doc.Save(sw);
+            }
+        }
+
+        class StoreEntryFactory : IEntryFactory
+        {
+            private readonly IEntryFactory _wrappedEntryFactory;
+
+            public StoreEntryFactory(IEntryFactory baseEntryFactory)
+            {
+                _wrappedEntryFactory = baseEntryFactory;
+            }
+
+            public INameTransform NameTransform
+            {
+                get { return _wrappedEntryFactory.NameTransform; }
+
+                set { _wrappedEntryFactory.NameTransform = value; }
+            }
+
+            public ZipEntry MakeDirectoryEntry(string directoryName)
+            {
+                return _wrappedEntryFactory.MakeDirectoryEntry(directoryName);
+            }
+
+            public ZipEntry MakeDirectoryEntry(string directoryName, bool useFileSystem)
+            {
+                return _wrappedEntryFactory.MakeDirectoryEntry(directoryName, useFileSystem);
+            }
+
+            public ZipEntry MakeFileEntry(string fileName)
+            {
+                var entry = _wrappedEntryFactory.MakeFileEntry(fileName);
+                entry.CompressionMethod = CompressionMethod.Stored;
+                return entry;
+            }
+
+            public ZipEntry MakeFileEntry(string fileName, bool useFileSystem)
+            {
+                var entry = _wrappedEntryFactory.MakeFileEntry(fileName, useFileSystem);
+                entry.CompressionMethod = CompressionMethod.Stored;
+                return entry;
+            }
+
+            public ZipEntry MakeFileEntry(string fileName, string entryName, bool useFileSystem)
+            {
+                var entry = _wrappedEntryFactory.MakeFileEntry(fileName, entryName, useFileSystem);
+                entry.CompressionMethod = CompressionMethod.Stored;
+                return entry;
             }
         }
     }
