@@ -4016,12 +4016,12 @@ ZRESULT TUnzip::Unzip(int index,void *dst,unsigned int len,DWORD flags)
   }
   if (h==INVALID_HANDLE_VALUE) return ZR_NOFILE;
   unzOpenCurrentFile(uf,password);
-  if (unzbuf==0) unzbuf=new char[16384]; DWORD haderr=0;
+  if (unzbuf==0) unzbuf=new char[1048576]; DWORD haderr=0;
   //
 
   for (; haderr==0;)
   { bool reached_eof;
-    int res = unzReadCurrentFile(uf,unzbuf,16384,&reached_eof);
+    int res = unzReadCurrentFile(uf,unzbuf, 1048576,&reached_eof);
     if (res==UNZ_PASSWORD) {haderr=ZR_PASSWORD; break;}
     if (res<0) {haderr=ZR_FLATE; break;}
     if (res>0) {DWORD writ; BOOL bres=WriteFile(h,unzbuf,res,&writ,NULL); if (!bres) {haderr=ZR_WRITE; break;}}
