@@ -23,7 +23,7 @@ namespace Squirrel
     static class Utility
     {
         public static string RemoveByteOrderMarkerIfPresent(string content)
-        { 
+        {
             return string.IsNullOrEmpty(content) ? 
                 string.Empty : RemoveByteOrderMarkerIfPresent(Encoding.UTF8.GetBytes(content));
         }

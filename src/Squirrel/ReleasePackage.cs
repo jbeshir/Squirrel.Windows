@@ -9,7 +9,6 @@ using System.Runtime.Versioning;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml;
-using ICSharpCode.SharpZipLib.Core;
 using ICSharpCode.SharpZipLib.Zip;
 using MarkdownSharp;
 using NuGet;
@@ -130,7 +129,7 @@ namespace Squirrel
                 var tempDir = new DirectoryInfo(tempPath);
 
                 extractZipDecoded(InputPackageFile, tempPath);
-                                
+             
                 this.Log().Info("Extracting dependent packages: [{0}]", String.Join(",", dependencies.Select(x => x.Id)));
                 extractDependentPackages(dependencies, tempDir, targetFramework);
 
@@ -151,7 +150,7 @@ namespace Squirrel
                 }
 
                 createZipEncoded(outputFile, tempPath);
-                                
+
                 ReleasePackageFile = outputFile;
                 return ReleasePackageFile;
             }
@@ -353,54 +352,6 @@ namespace Squirrel
 
             using (var sw = new StreamWriter(path, false, Encoding.UTF8)) {
                 doc.Save(sw);
-            }
-        }
-
-        class StoreEntryFactory : IEntryFactory
-        {
-            private readonly IEntryFactory _wrappedEntryFactory;
-
-            public StoreEntryFactory(IEntryFactory baseEntryFactory)
-            {
-                _wrappedEntryFactory = baseEntryFactory;
-            }
-
-            public INameTransform NameTransform
-            {
-                get { return _wrappedEntryFactory.NameTransform; }
-
-                set { _wrappedEntryFactory.NameTransform = value; }
-            }
-
-            public ZipEntry MakeDirectoryEntry(string directoryName)
-            {
-                return _wrappedEntryFactory.MakeDirectoryEntry(directoryName);
-            }
-
-            public ZipEntry MakeDirectoryEntry(string directoryName, bool useFileSystem)
-            {
-                return _wrappedEntryFactory.MakeDirectoryEntry(directoryName, useFileSystem);
-            }
-
-            public ZipEntry MakeFileEntry(string fileName)
-            {
-                var entry = _wrappedEntryFactory.MakeFileEntry(fileName);
-                entry.CompressionMethod = CompressionMethod.Stored;
-                return entry;
-            }
-
-            public ZipEntry MakeFileEntry(string fileName, bool useFileSystem)
-            {
-                var entry = _wrappedEntryFactory.MakeFileEntry(fileName, useFileSystem);
-                entry.CompressionMethod = CompressionMethod.Stored;
-                return entry;
-            }
-
-            public ZipEntry MakeFileEntry(string fileName, string entryName, bool useFileSystem)
-            {
-                var entry = _wrappedEntryFactory.MakeFileEntry(fileName, entryName, useFileSystem);
-                entry.CompressionMethod = CompressionMethod.Stored;
-                return entry;
             }
         }
     }

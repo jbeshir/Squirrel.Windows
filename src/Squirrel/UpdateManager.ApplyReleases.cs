@@ -127,7 +127,7 @@ namespace Squirrel
                         // they're still running. I cannot even.
                         var toKill = allApps
                             .SelectMany(x => Process.GetProcessesByName(x.Name.Replace(".exe", "")))
-                                .ToList();
+                            .ToList();
 
                         if (toKill.Count > 0) {
                             toKill.ForEach(x => x.Kill());
@@ -284,15 +284,15 @@ namespace Squirrel
             {
                 return Task.Run(async () => {
                     var zipper = new FastZip();
-                var target = getDirectoryForRelease(release.Version);
+                    var target = getDirectoryForRelease(release.Version);
 
-                // NB: This might happen if we got killed partially through applying the release
-                if (target.Exists) {
-                    this.Log().Warn("Found partially applied release folder, killing it: " + target.FullName);
-                    await Utility.DeleteDirectory(target.FullName);
-                }
+                    // NB: This might happen if we got killed partially through applying the release
+                    if (target.Exists) {
+                        this.Log().Warn("Found partially applied release folder, killing it: " + target.FullName);
+                        await Utility.DeleteDirectory(target.FullName);
+                    }
 
-                target.Create();
+                    target.Create();
 
                     this.Log().Info("Writing files to app directory: {0}", target.FullName);
                     zipper.ExtractZip(
@@ -300,11 +300,11 @@ namespace Squirrel
                         target.FullName, FastZip.Overwrite.Always, (o) => true, null, @"lib", true);
 
                     // Move all of the files out of the lib/ dirs in the NuGet package
-                // into our target App directory.
-                //
-                // NB: We sort this list in order to guarantee that if a Net20
-                // and a Net40 version of a DLL get shipped, we always end up
-                // with the 4.0 version.
+                    // into our target App directory.
+                    //
+                    // NB: We sort this list in order to guarantee that if a Net20
+                    // and a Net40 version of a DLL get shipped, we always end up
+                    // with the 4.0 version.
                     var libDir = target.GetDirectories().First(x => x.Name.Equals("lib", StringComparison.OrdinalIgnoreCase));
                     var toMove = libDir.GetDirectories().OrderBy(x => x.Name);
 
@@ -324,7 +324,7 @@ namespace Squirrel
                     });
 
                     await Utility.DeleteDirectory(libDir.FullName);
-                return target.FullName;
+                    return target.FullName;
                 });
             }
 
