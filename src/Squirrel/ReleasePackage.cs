@@ -193,7 +193,7 @@ namespace Squirrel
             var fsOut = File.Create(zipFilePath);
             var zipStream = new ZipOutputStream(fsOut);
 
-            zipStream.SetMethod(ZipOutputStream.STORED);
+            zipStream.SetLevel(0);
 
             compressFolderEncoded(folder, zipStream, offset);
 
