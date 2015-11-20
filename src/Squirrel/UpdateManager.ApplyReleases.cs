@@ -41,8 +41,15 @@ namespace Squirrel
                         this.Log().Info("No release to install, running the app");
                         await invokePostInstall(updateInfo.CurrentlyInstalledVersion.Version, false, true, silentInstall);
                     }
+                    else
+                    {
+                        this.Log().Info("No release to install, ensuring post-install has been completed");
+                        await invokePostInstall(updateInfo.CurrentlyInstalledVersion.Version, false, false, silentInstall);
+                    }
+                    progress(75);
 
-                    progress(100);
+                    await ApplyReleasesPostInstall(updateInfo, updateInfo.CurrentlyInstalledVersion.Version, progress);
+
                     return getDirectoryForRelease(updateInfo.CurrentlyInstalledVersion.Version).FullName;
                 }
 
@@ -55,11 +62,18 @@ namespace Squirrel
                 progress(50);
 
                 var newVersion = currentReleases.MaxBy(x => x.Version).First().Version;
-                executeSelfUpdate(newVersion);
-
                 await this.ErrorIfThrows(() => invokePostInstall(newVersion, attemptingFullInstall, false, silentInstall),
                     "Failed to invoke post-install");
                 progress(75);
+
+                await ApplyReleasesPostInstall(updateInfo, currentReleases.MaxBy(x => x.Version).First().Version, progress);
+
+                return ret;
+            }
+
+            private async Task ApplyReleasesPostInstall(UpdateInfo updateInfo, SemanticVersion newVersion, Action<int> progress)
+            {
+                executeSelfUpdate(newVersion);
 
                 this.Log().Info("Starting fixPinnedExecutables");
                 this.ErrorIfThrows(() => fixPinnedExecutables(updateInfo.FutureReleaseEntry.Version));
@@ -76,17 +90,18 @@ namespace Squirrel
                 unshimOurselves();
                 progress(85);
 
-                try {
+                try
+                {
                     var currentVersion = updateInfo.CurrentlyInstalledVersion != null ?
                         updateInfo.CurrentlyInstalledVersion.Version : null;
 
                     await cleanDeadVersions(currentVersion, newVersion);
-                } catch (Exception ex) {
+                }
+                catch (Exception ex)
+                {
                     this.Log().WarnException("Failed to clean dead versions, continuing anyways", ex);
                 }
                 progress(100);
-
-                return ret;
             }
 
             public async Task FullUninstall()
