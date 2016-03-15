@@ -153,7 +153,9 @@ namespace Squirrel
                     }
                 }
 
-                fixPinnedExecutables(new SemanticVersion(255, 255, 255, 255));
+                try {
+                    this.ErrorIfThrows(() => fixPinnedExecutables(new SemanticVersion(255, 255, 255, 255), true));
+                } catch { }
 
                 await this.ErrorIfThrows(() => Utility.DeleteDirectoryOrJustGiveUp(rootAppDirectory),
                     "Failed to delete app directory: " + rootAppDirectory);
@@ -162,6 +164,10 @@ namespace Squirrel
                 // this folder - if we don't do this, users who "accidentally" run as 
                 // administrator will find the app reinstalling itself on every
                 // reboot
+                if (!Directory.Exists(rootAppDirectory)) {
+                    Directory.CreateDirectory(rootAppDirectory);
+                }
+
                 File.WriteAllText(Path.Combine(rootAppDirectory, ".dead"), " ");
             }
 
@@ -242,7 +248,7 @@ namespace Squirrel
                     this.Log().Info("Creating shortcut for {0} => {1}", exeName, file);
 
                     ShellLink sl;
-                    this.ErrorIfThrows(() => {
+                    this.ErrorIfThrows(() => Utility.Retry(() => {
                         File.Delete(file);
 
                         sl = new ShellLink {
@@ -262,7 +268,7 @@ namespace Squirrel
 
                         this.Log().Info("About to save shortcut: {0} (target {1}, workingDir {2}, args {3})", file, sl.Target, sl.WorkingDirectory, sl.Arguments);
                         if (ModeDetector.InUnitTestRunner() == false) sl.Save(file);
-                    }, "Can't write shortcut: " + file);
+                    }, 4), "Can't write shortcut: " + file);
                 }
 
                 fixPinnedExecutables(zf.Version);
@@ -455,7 +461,7 @@ namespace Squirrel
                     .ForEach(info => Process.Start(info));
             }
 
-            void fixPinnedExecutables(SemanticVersion newCurrentVersion)
+            void fixPinnedExecutables(SemanticVersion newCurrentVersion, bool removeAll = false)
             {
                 if (Environment.OSVersion.Version < new Version(6, 1)) {
                     this.Log().Warn("fixPinnedExecutables: Found OS Version '{0}', exiting...", Environment.OSVersion.VersionString);
@@ -463,41 +469,42 @@ namespace Squirrel
                 }
 
                 var newCurrentFolder = "app-" + newCurrentVersion;
-                var oldAppDirectories = (new DirectoryInfo(rootAppDirectory)).GetDirectories()
-                    .Where(x => x.Name.StartsWith("app-", StringComparison.InvariantCultureIgnoreCase))
-                    .Where(x => x.Name != newCurrentFolder)
-                    .Select(x => x.FullName)
-                    .ToArray();
-
-                if (!oldAppDirectories.Any()) {
-                    this.Log().Info("fixPinnedExecutables: oldAppDirectories is empty, this is pointless");
-                    return;
-                }
-
                 var newAppPath = Path.Combine(rootAppDirectory, newCurrentFolder);
 
                 var taskbarPath = Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
                     "Microsoft\\Internet Explorer\\Quick Launch\\User Pinned\\TaskBar");
 
-                Func<FileInfo, ShellLink> resolveLink = file => {
+                if (!Directory.Exists(taskbarPath)) {
+                    this.Log().Info("fixPinnedExecutables: PinnedExecutables directory doesn't exitsts, skiping...");
+                    return;
+                }
+
+                var resolveLink = new Func<FileInfo, ShellLink>(file => {
                     try {
+                        this.Log().Info("Examining Pin: " + file);
                         return new ShellLink(file.FullName);
                     } catch (Exception ex) {
                         var message = String.Format("File '{0}' could not be converted into a valid ShellLink", file.FullName);
                         this.Log().WarnException(message, ex);
                         return null;
                     }
-                };
+                });
 
-                var shellLinks = (new DirectoryInfo(taskbarPath)).GetFiles("*.lnk")
-                    .Select(resolveLink)
-                    .Where(x => x != null)
-                    .ToArray();
+                var shellLinks = (new DirectoryInfo(taskbarPath)).GetFiles("*.lnk").Select(resolveLink).ToArray();
 
                 foreach (var shortcut in shellLinks) {
                     try {
-                        updateLink(shortcut, oldAppDirectories, newAppPath);
+                        if (shortcut == null) continue;
+                        if (String.IsNullOrWhiteSpace(shortcut.Target)) continue;
+                        if (!shortcut.Target.StartsWith(rootAppDirectory, StringComparison.OrdinalIgnoreCase)) continue;
+
+                        if (removeAll) {
+                            Utility.DeleteFileHarder(shortcut.ShortCutFile);
+                        } else {
+                            updateLink(shortcut, newAppPath);
+                        }
+
                     } catch (Exception ex) {
                         var message = String.Format("fixPinnedExecutables: shortcut failed: {0}", shortcut.Target);
                         this.Log().ErrorException(message, ex);
@@ -505,43 +512,52 @@ namespace Squirrel
                 }
             }
 
-            void updateLink(ShellLink shortcut, string[] oldAppDirectories, string newAppPath)
+            void updateLink(ShellLink shortcut, string newAppPath)
             {
-                this.Log().Info("Processing shortcut '{0}'", shortcut.Target);
+                this.Log().Info("Processing shortcut '{0}'", shortcut.ShortCutFile);
 
-                foreach (var oldAppDirectory in oldAppDirectories) {
-                    if (!shortcut.Target.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase) && !shortcut.IconPath.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase)) {
-                        this.Log().Info("Does not match '{0}', continuing to next directory", oldAppDirectory);
-                        continue;
-                    }
+                var target = Environment.ExpandEnvironmentVariables(shortcut.Target);
+                var targetIsUpdateDotExe = target.EndsWith("update.exe", StringComparison.OrdinalIgnoreCase);
 
-                    // replace old app path with new app path and check, if executable still exists
-                    var newTarget = Path.Combine(newAppPath, shortcut.Target.Substring(oldAppDirectory.Length + 1));
-
-                    if (File.Exists(newTarget)) {
-                        shortcut.Target = newTarget;
-
-                        // replace working directory too if appropriate
-                        if (shortcut.WorkingDirectory.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase)) {
-                            this.Log().Info("Changing new directory to '{0}'", newAppPath);
-                            shortcut.WorkingDirectory = Path.Combine(newAppPath,
-                                shortcut.WorkingDirectory.Substring(oldAppDirectory.Length + 1));
-                        }
-
-                        // replace working directory too if appropriate
-                        if (shortcut.IconPath.StartsWith(oldAppDirectory, StringComparison.OrdinalIgnoreCase)) {
-                            this.Log().Info("Changing new directory to '{0}'", newAppPath);
-                            shortcut.IconPath = Path.Combine(newAppPath, shortcut.IconPath.Substring(oldAppDirectory.Length + 1));
-                        }
-
-                        shortcut.Save();
-                    } else {
-                        this.Log().Info("Unpinning {0} from taskbar", shortcut.Target);
-                        TaskbarHelper.UnpinFromTaskbar(shortcut.Target);
-                    }
-
-                    break;
+                this.Log().Info("Old shortcut target: '{0}'", target);
+                if (!targetIsUpdateDotExe) {
+                    target = Path.Combine(newAppPath, Path.GetFileName(shortcut.Target));
                 }
+                this.Log().Info("New shortcut target: '{0}'", target);
+
+                shortcut.WorkingDirectory = newAppPath;
+                shortcut.Target = target;
+
+                // NB: If the executable was in a previous version but not in this 
+                // one, we should disappear this pin.
+                if (!File.Exists(target)) {
+                    shortcut.Dispose();
+                    this.ErrorIfThrows(() => Utility.DeleteFileHarder(target), "Failed to delete outdated pinned shortcut to: " + target);
+                    return;
+                }
+
+                this.Log().Info("Old iconPath is: '{0}'", shortcut.IconPath);
+                if (!File.Exists(shortcut.IconPath) || shortcut.IconPath.IndexOf("app-", StringComparison.OrdinalIgnoreCase) > 1) {
+                    var iconPath = Path.Combine(newAppPath, Path.GetFileName(shortcut.IconPath));
+
+                    if (!File.Exists(iconPath) && targetIsUpdateDotExe) {
+                        var executable = shortcut.Arguments.Replace("--processStart ", "");
+                        iconPath = Path.Combine(newAppPath, executable);
+                    }
+
+                    this.Log().Info("Setting iconPath to: '{0}'", iconPath);
+                    shortcut.IconPath = iconPath;
+
+                    if (!File.Exists(iconPath)) {
+                        this.Log().Warn("Tried to use {0} for icon path but didn't exist, falling back to EXE", iconPath);
+
+                        shortcut.IconPath = target;
+                        shortcut.IconIndex = 0;
+                    }
+                }
+
+                this.ErrorIfThrows(() => Utility.Retry(() => shortcut.Save(), 2), "Couldn't write shortcut " + shortcut.ShortCutFile);
+                this.Log().Info("Finished shortcut successfully");
             }
 
             internal void unshimOurselves()

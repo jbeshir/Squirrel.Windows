@@ -177,15 +177,20 @@ namespace Squirrel
             }
         }
 
-        public static Task<Tuple<int, string>> InvokeProcessAsync(string fileName, string arguments, CancellationToken ct)
+        public static Task<Tuple<int, string>> InvokeProcessAsync(string fileName, string arguments, CancellationToken ct, string workingDirectory = "")
         {
             var psi = new ProcessStartInfo(fileName, arguments);
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT && fileName.EndsWith (".exe", StringComparison.OrdinalIgnoreCase)) {
+                psi = new ProcessStartInfo("wine", fileName + " " + arguments);
+            }
+
             psi.UseShellExecute = false;
             psi.WindowStyle = ProcessWindowStyle.Hidden;
             psi.ErrorDialog = false;
             psi.CreateNoWindow = true;
             psi.RedirectStandardOutput = true;
             psi.RedirectStandardError = true;
+            psi.WorkingDirectory = workingDirectory;
 
             return InvokeProcessAsync(psi, ct);
         }
@@ -578,6 +583,44 @@ namespace Squirrel
             MOVEFILE_WRITE_THROUGH = 0x00000008,
             MOVEFILE_CREATE_HARDLINK = 0x00000010,
             MOVEFILE_FAIL_IF_NOT_TRACKABLE = 0x00000020
+        }
+    }
+
+    static unsafe class UnsafeUtility
+    {
+        public static List<Tuple<string, int>> EnumerateProcesses()
+        {
+            int length = 0;
+            var pids = new int[2048];
+
+            fixed(int* p = pids) {
+                if (!NativeMethods.EnumProcesses((IntPtr)p, sizeof(int) * pids.Length, out length)) {
+                    throw new Win32Exception("Failed to enumerate processes");
+                }
+
+                if (length < 1) throw new Exception("Failed to enumerate processes");
+            }
+
+            return Enumerable.Range(0, length)
+                .Where(i => pids[i] > 0)
+                .Select(i => {
+                    try {
+                        var hProcess = NativeMethods.OpenProcess(ProcessAccess.QueryLimitedInformation, false, pids[i]);
+                        if (hProcess == IntPtr.Zero) throw new Win32Exception();
+
+                        var sb = new StringBuilder(256);
+                        var capacity = sb.Capacity;
+                        if (!NativeMethods.QueryFullProcessImageName(hProcess, 0, sb, ref capacity)) {
+                            throw new Win32Exception();
+                        }
+
+                        NativeMethods.CloseHandle(hProcess);
+                        return Tuple.Create(sb.ToString(), pids[i]);
+                    } catch (Exception) {
+                        return Tuple.Create(default(string), pids[i]);
+                    }
+                })
+                .ToList();
         }
     }
 

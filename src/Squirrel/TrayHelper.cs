@@ -52,12 +52,13 @@ namespace Squirrel
                     if (item.preference != NOTIFYITEM_PREFERENCE.PREFERENCE_SHOW_WHEN_ACTIVE) continue;
                     item.preference = NOTIFYITEM_PREFERENCE.PREFERENCE_SHOW_ALWAYS;
 
+                    var writable = NOTIFYITEM_Writable.fromNotifyItem(item);
                     if (legacy) {
                         var notifier = (ITrayNotifyWin7)instance;
-                        notifier.SetPreference(NOTIFYITEM_Writable.fromNotifyItem(item));
+                        notifier.SetPreference(ref writable);
                     } else {
                         var notifier = (ITrayNotify)instance;
-                        notifier.SetPreference(NOTIFYITEM_Writable.fromNotifyItem(item));
+                        notifier.SetPreference(ref writable);
                     }
                 }
             } catch (Exception ex) {
@@ -77,7 +78,7 @@ namespace Squirrel
                 return;
             }
 
-            if (iconStreamData.Length < 20) return;
+            if (iconStreamData == null || iconStreamData.Length < 20) return;
             var toKeep = new List<byte[]>();
             var header = default(IconStreamsHeader);
 

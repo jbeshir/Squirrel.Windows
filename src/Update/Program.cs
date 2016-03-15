@@ -16,8 +16,8 @@ using Squirrel;
 using Squirrel.Json;
 using System.Drawing;
 using System.Windows;
-using System.Windows.Shell;
 using NuGet;
+using System.Text.RegularExpressions;
 
 namespace Squirrel.Update
 {
@@ -95,7 +95,7 @@ namespace Squirrel.Update
                 string icon = default(string);
                 string shortcutArgs = default(string);
                 bool shouldWait = false;
-                bool noMsi = false;
+                bool noMsi = (Environment.OSVersion.Platform != PlatformID.Win32NT);        // NB: WiX doesn't work under Mono / Wine
 
                 opts = new OptionSet() {
                     "Usage: Squirrel.exe command [OPTS]",
@@ -141,6 +141,7 @@ namespace Squirrel.Update
                 }
 
                 switch (updateAction) {
+#if !MONO
                 case UpdateAction.Install:
                     var progressSource = new ProgressSource();
                     if (!silentInstall) { 
@@ -162,9 +163,6 @@ namespace Squirrel.Update
                 case UpdateAction.UpdateSelf:
                     UpdateSelf().Wait();
                     break;
-                case UpdateAction.Releasify:
-                    Releasify(target, releaseDir, packagesDir, bootstrapperExe, backgroundGif, signingParameters, baseUrl, setupIcon, !noMsi);
-                    break;
                 case UpdateAction.Shortcut:
                     Shortcut(target, shortcutArgs, processStartArgs, setupIcon);
                     break;
@@ -173,6 +171,10 @@ namespace Squirrel.Update
                     break;
                 case UpdateAction.ProcessStart:
                     ProcessStart(processStart, processStartArgs, shouldWait);
+                    break;
+#endif
+                case UpdateAction.Releasify:
+                    Releasify(target, releaseDir, packagesDir, bootstrapperExe, backgroundGif, signingParameters, baseUrl, setupIcon, !noMsi);
                     break;
                 }
             }
@@ -203,6 +205,9 @@ namespace Squirrel.Update
                 this.Log().Info("About to install to: " + mgr.RootAppDirectory);
                 if (Directory.Exists(mgr.RootAppDirectory)) {
                     this.Log().Warn("Install path {0} already exists, burning it to the ground", mgr.RootAppDirectory);
+
+                    mgr.KillAllExecutablesBelongingToPackage();
+                    await Task.Delay(250);
 
                     await this.ErrorIfThrows(() => Utility.DeleteDirectory(mgr.RootAppDirectory),
                         "Failed to remove existing directory on full install, is the app still running???");
@@ -318,9 +323,9 @@ namespace Squirrel.Update
                 }
             }
 
-            targetDir = targetDir ?? ".\\Releases";
+            targetDir = targetDir ?? Path.Combine(".", "Releases");
             packagesDir = packagesDir ?? ".";
-            bootstrapperExe = bootstrapperExe ?? ".\\Setup.exe";
+            bootstrapperExe = bootstrapperExe ?? Path.Combine(".", "Setup.exe");
 
             if (!Directory.Exists(targetDir)) {
                 Directory.CreateDirectory(targetDir);
@@ -391,21 +396,11 @@ namespace Squirrel.Update
             File.Copy(bootstrapperExe, targetSetupExe, true);
             var zipPath = createSetupEmbeddedZip(Path.Combine(di.FullName, newestFullRelease.Filename), di.FullName, backgroundGif, signingOpts).Result;
 
+            var writeZipToSetup = findExecutable("WriteZipToSetup.exe");
+
             try {
-                var zip = File.ReadAllBytes(zipPath);
-
-                IntPtr handle = NativeMethods.BeginUpdateResource(targetSetupExe, false);
-                if (handle == IntPtr.Zero) {
-                    throw new Win32Exception();
-                }
-
-                if (!NativeMethods.UpdateResource(handle, "DATA", new IntPtr(131), 0x0409, zip, zip.Length)) {
-                    throw new Win32Exception();
-                }
-
-                if (!NativeMethods.EndUpdateResource(handle, false)) {
-                    throw new Win32Exception();
-                }
+                var result = Utility.InvokeProcessAsync(writeZipToSetup, String.Format("\"{0}\" \"{1}\"", targetSetupExe, zipPath), CancellationToken.None).Result;
+                if (result.Item1 != 0) throw new Exception("Failed to write Zip to Setup.exe!\n\n" + result.Item2);
             } catch (Exception ex) {
                 this.Log().ErrorException("Failed to update Setup.exe with new Zip file", ex);
             } finally {
@@ -543,7 +538,7 @@ namespace Squirrel.Update
             this.Log().Info("Building embedded zip file for Setup.exe");
             using (Utility.WithTempDirectory(out tempPath, null)) {
                 this.ErrorIfThrows(() => {
-                    File.Copy(Assembly.GetEntryAssembly().Location, Path.Combine(tempPath, "Update.exe"));
+                    File.Copy(Assembly.GetEntryAssembly().Location.Replace("-Mono.exe", ".exe"), Path.Combine(tempPath, "Update.exe"));
                     File.Copy(fullPackage, Path.Combine(tempPath, Path.GetFileName(fullPackage)));
                 }, "Failed to write package files to temp dir: " + tempPath);
 
@@ -607,6 +602,7 @@ namespace Squirrel.Update
 
         static async Task setPEVersionInfoAndIcon(string exePath, IPackage package, string iconPath = null)
         {
+            var realExePath = Path.GetFullPath(exePath);
             var company = String.Join(",", package.Authors);
             var verStrings = new Dictionary<string, string>() {
                 { "CompanyName", company },
@@ -615,34 +611,41 @@ namespace Squirrel.Update
                 { "ProductName", package.Description ?? package.Summary ?? package.Id },
             };
 
-            var args = verStrings.Aggregate(new StringBuilder("\"" + exePath + "\""), (acc, x) => { acc.AppendFormat(" --set-version-string \"{0}\" \"{1}\"", x.Key, x.Value); return acc; });
+            var args = verStrings.Aggregate(new StringBuilder("\"" + realExePath + "\""), (acc, x) => { acc.AppendFormat(" --set-version-string \"{0}\" \"{1}\"", x.Key, x.Value); return acc; });
             args.AppendFormat(" --set-file-version {0} --set-product-version {0}", package.Version.ToString());
             if (iconPath != null) {
                 args.AppendFormat(" --set-icon \"{0}\"", Path.GetFullPath(iconPath));
             }
 
             // Try to find rcedit.exe
-            var exe = @".\rcedit.exe";
-            if (!File.Exists(exe)) {
-                exe = Path.Combine(
-                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
-                    "rcedit.exe");
-
-                // Run down PATH and hope for the best
-                if (!File.Exists(exe)) exe = "rcedit.exe";
-            }
+            string exe = findExecutable("rcedit.exe");
 
             var processResult = await Utility.InvokeProcessAsync(exe, args.ToString(), CancellationToken.None);
 
             if (processResult.Item1 != 0) {
                 var msg = String.Format(
-                    "Failed to modify resources, command invoked was: '{0} {1}'\n\nOutput was:\n{2}", 
+                    "Failed to modify resources, command invoked was: '{0} {1}'\n\nOutput was:\n{2}",
                     exe, args, processResult.Item2);
 
                 throw new Exception(msg);
             } else {
                 Console.WriteLine(processResult.Item2);
             }
+        }
+
+        static string findExecutable(string toFind)
+        {
+            var exe = @".\" + toFind;
+            if (!File.Exists(exe)) {
+                exe = Path.Combine(
+                    Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location),
+                    toFind);
+
+                // Run down PATH and hope for the best
+                if (!File.Exists(exe)) exe = toFind;
+            }
+
+            return exe;
         }
 
         static async Task createMsiPackage(string setupExe, IPackage package)
@@ -656,6 +659,7 @@ namespace Squirrel.Update
                 { "Id", package.Id },
                 { "Title", package.Title },
                 { "Author", company },
+                { "Version", Regex.Replace(package.Version.ToString(), @"-.*$", "") },
                 { "Summary", package.Summary ?? package.Description ?? package.Id },
             });
 
@@ -664,7 +668,7 @@ namespace Squirrel.Update
 
             var candleParams = String.Format("-nologo -ext WixNetFxExtension -out \"{0}\" \"{1}\"", wxsTarget.Replace(".wxs", ".wixobj"), wxsTarget);
             var processResult = await Utility.InvokeProcessAsync(
-                Path.Combine(pathToWix, "candle.exe"), candleParams, CancellationToken.None);
+                Path.Combine(pathToWix, "candle.exe"), candleParams, CancellationToken.None, setupExeDir);
 
             if (processResult.Item1 != 0) {
                 var msg = String.Format(
@@ -676,7 +680,7 @@ namespace Squirrel.Update
 
             var lightParams = String.Format("-ext WixNetFxExtension -sval -out \"{0}\" \"{1}\"", wxsTarget.Replace(".wxs", ".msi"), wxsTarget.Replace(".wxs", ".wixobj"));
             processResult = await Utility.InvokeProcessAsync(
-                Path.Combine(pathToWix, "light.exe"), lightParams, CancellationToken.None);
+                Path.Combine(pathToWix, "light.exe"), lightParams, CancellationToken.None, setupExeDir);
 
             if (processResult.Item1 != 0) {
                 var msg = String.Format(
@@ -742,6 +746,8 @@ namespace Squirrel.Update
         static int consoleCreated = 0;
         static void ensureConsole()
         {
+            if (Environment.OSVersion.Platform != PlatformID.Win32NT) return;
+
             if (Interlocked.CompareExchange(ref consoleCreated, 1, 0) == 1) return;
 
             if (!NativeMethods.AttachConsole(-1)) {
